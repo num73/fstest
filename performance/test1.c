@@ -1,15 +1,14 @@
 /*
     基础性能测试，包括顺序读、顺序写、随机读、随机写等场景
     测试函数使用posix的read，write
-
+    文件打开时设置DIRECT IO标志，绕过页缓存
 
 */
-
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -21,7 +20,7 @@ typedef long long ll;
 #define BLOCK_SIZE (4096)                // 4KB
 #define BLOCK_COUNT (FILE_SIZE / BLOCK_SIZE)
 
-#define N (10)
+#define N (1)
 
 #define NANOS_PER_SECOND (1000000000L)
 
@@ -39,12 +38,13 @@ void fill_rand_buffer(char *buf, size_t size) {
 }
 
 void create_test_file() {
-    int fd = open(FILE_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    int fd = open(FILE_PATH, O_CREAT | O_WRONLY | O_TRUNC | O_DIRECT, 0644);
     if (fd < 0) {
         perror("open for create");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf;
+    posix_memalign((void **)&buf, BLOCK_SIZE, BLOCK_SIZE);
 
     for (size_t i = 0; i < BLOCK_COUNT; ++i) {
         fill_rand_buffer(buf, BLOCK_SIZE);
@@ -59,12 +59,13 @@ void create_test_file() {
 
 // test seq read
 void test_seq_read() {
-    int fd = open(FILE_PATH, O_RDONLY);
+    int fd = open(FILE_PATH, O_RDONLY | O_DIRECT);
     if (fd < 0) {
         perror("open for read");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf;
+    posix_memalign((void **)&buf, BLOCK_SIZE, BLOCK_SIZE);
     struct timespec start, end;
 
     atomic_thread_fence(memory_order_seq_cst);
@@ -96,12 +97,13 @@ void test_seq_read() {
 }
 
 void test_seq_write() {
-    int fd = open(FILE_PATH, O_WRONLY);
+    int fd = open(FILE_PATH, O_WRONLY | O_DIRECT);
     if (fd < 0) {
         perror("open for write");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf;
+    posix_memalign((void **)&buf, BLOCK_SIZE, BLOCK_SIZE);
     fill_rand_buffer(buf, BLOCK_SIZE);
     struct timespec start, end;
 
@@ -132,12 +134,13 @@ void test_seq_write() {
 }
 
 void test_random_read() {
-    int fd = open(FILE_PATH, O_RDONLY);
+    int fd = open(FILE_PATH, O_RDONLY | O_DIRECT);
     if (fd < 0) {
         perror("open for read");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf;
+    posix_memalign((void **)&buf, BLOCK_SIZE, BLOCK_SIZE);
     struct timespec start, end;
 
     atomic_thread_fence(memory_order_seq_cst);
@@ -167,12 +170,13 @@ void test_random_read() {
 }
 
 void test_random_write() {
-    int fd = open(FILE_PATH, O_WRONLY);
+    int fd = open(FILE_PATH, O_WRONLY | O_DIRECT);
     if (fd < 0) {
         perror("open for write");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf;
+    posix_memalign((void **)&buf, BLOCK_SIZE, BLOCK_SIZE);
     fill_rand_buffer(buf, BLOCK_SIZE);
     struct timespec start, end;
 
@@ -218,6 +222,7 @@ void clear_test_file() {
 int main() {
     printf("Creating test file of size %d bytes...\n", FILE_SIZE);
     create_test_file();
+    printf("Create Success!\n");
     test_seq_read();
     test_seq_write();
     test_random_read();

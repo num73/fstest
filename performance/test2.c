@@ -2,7 +2,7 @@
     基础性能测试，包括顺序读、顺序写、随机读、随机写等场景
     测试函数使用posix的read，write
 
-
+    文件大小固定，不同的io_size对性能的影响测试。
 */
 
 #include <fcntl.h>
@@ -15,11 +15,13 @@
 #include <unistd.h>
 
 typedef long long ll;
+#define _1KB_BYTES (1024)
+#define _1MB_BYTES (1024 * 1024)
 
 #define FILE_PATH "/mnt/nufs/fs_testfile.dat"
 #define FILE_SIZE (1024 * 1024 * 1024L)  // 1GB
-#define BLOCK_SIZE (4096)                // 4KB
-#define BLOCK_COUNT (FILE_SIZE / BLOCK_SIZE)
+
+// #define BLOCK_COUNT (FILE_SIZE / BLOCK_SIZE)
 
 #define N (10)
 
@@ -39,32 +41,38 @@ void fill_rand_buffer(char *buf, size_t size) {
 }
 
 void create_test_file() {
+    printf("Creating test file: %s\n", FILE_PATH);
+    size_t block_size = _1KB_BYTES * 4;
+    ll block_count = FILE_SIZE / block_size;
+
     int fd = open(FILE_PATH, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) {
         perror("open for create");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf = malloc(block_size);
 
-    for (size_t i = 0; i < BLOCK_COUNT; ++i) {
-        fill_rand_buffer(buf, BLOCK_SIZE);
-        if (write(fd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
+    for (size_t i = 0; i < block_count; ++i) {
+        fill_rand_buffer(buf, block_size);
+        if (write(fd, buf, block_size) != block_size) {
             perror("write");
             exit(1);
         }
     }
     close(fd);
     free(buf);
+    printf("Test file created.\n");
 }
 
 // test seq read
-void test_seq_read() {
+double test_seq_read(size_t io_size) {
+    ll block_count = FILE_SIZE / io_size;
     int fd = open(FILE_PATH, O_RDONLY);
     if (fd < 0) {
         perror("open for read");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf = malloc(io_size);
     struct timespec start, end;
 
     atomic_thread_fence(memory_order_seq_cst);
@@ -73,8 +81,8 @@ void test_seq_read() {
 
     for (ll i = 0; i < N; i++) {
         // printf("Reading iteration %d...\n", i);
-        for (int j = 0; j < BLOCK_COUNT; j++) {
-            if (read(fd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
+        for (int j = 0; j < block_count; j++) {
+            if (read(fd, buf, io_size) != io_size) {
                 perror("read");
                 exit(1);
             }
@@ -85,24 +93,26 @@ void test_seq_read() {
     atomic_thread_fence(memory_order_seq_cst);
     clock_gettime(CLOCK_MONOTONIC, &end);
     atomic_thread_fence(memory_order_seq_cst);
-
-    printf(
-        "Sequential read throughput: %.2f MB/s\n",
-        (N * FILE_SIZE / (1024.0 * 1024.0)) /
-            (calculate_time_diff_ns(&start, &end) / (double)NANOS_PER_SECOND));
+    double duration = calculate_time_diff_ns(&start, &end);
+    double throughput = (N * FILE_SIZE / (1024.0 * 1024.0)) /
+                        (duration / (double)NANOS_PER_SECOND);
+    printf("IO size %zu Sequential read throughput: %.2f MB/s\n", io_size,
+           throughput);
 
     close(fd);
     free(buf);
+    return throughput;
 }
 
-void test_seq_write() {
+double test_seq_write(size_t io_size) {
+    ll block_count = FILE_SIZE / io_size;
     int fd = open(FILE_PATH, O_WRONLY);
     if (fd < 0) {
         perror("open for write");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
-    fill_rand_buffer(buf, BLOCK_SIZE);
+    char *buf = malloc(io_size);
+    fill_rand_buffer(buf, io_size);
     struct timespec start, end;
 
     atomic_thread_fence(memory_order_seq_cst);
@@ -110,8 +120,8 @@ void test_seq_write() {
     atomic_thread_fence(memory_order_seq_cst);
 
     for (ll i = 0; i < N; i++) {
-        for (int j = 0; j < BLOCK_COUNT; j++) {
-            if (write(fd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
+        for (int j = 0; j < block_count; j++) {
+            if (write(fd, buf, io_size) != io_size) {
                 perror("write");
                 exit(1);
             }
@@ -122,22 +132,25 @@ void test_seq_write() {
     clock_gettime(CLOCK_MONOTONIC, &end);
     atomic_thread_fence(memory_order_seq_cst);
 
-    printf(
-        "Sequential write throughput: %.2f MB/s\n",
-        (N * FILE_SIZE / (1024.0 * 1024.0)) /
-            (calculate_time_diff_ns(&start, &end) / (double)NANOS_PER_SECOND));
+    double duration = calculate_time_diff_ns(&start, &end);
+    double throughput = (N * FILE_SIZE / (1024.0 * 1024.0)) /
+                        (duration / (double)NANOS_PER_SECOND);
+    printf("IO size %zu Sequential write throughput: %.2f MB/s\n", io_size,
+           throughput);
 
     close(fd);
     free(buf);
+    return throughput;
 }
 
-void test_random_read() {
+double test_random_read(size_t io_size) {
+    ll block_count = FILE_SIZE / io_size;
     int fd = open(FILE_PATH, O_RDONLY);
     if (fd < 0) {
         perror("open for read");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
+    char *buf = malloc(io_size);
     struct timespec start, end;
 
     atomic_thread_fence(memory_order_seq_cst);
@@ -146,10 +159,10 @@ void test_random_read() {
 
     for (ll i = 0; i < N; i++) {
         // Randomly seek to a block
-        for (int j = 0; j < BLOCK_COUNT; j++) {
-            off_t offset = (rand() % BLOCK_COUNT) * BLOCK_SIZE;
+        for (int j = 0; j < block_count; j++) {
+            off_t offset = (rand() % block_count) * io_size;
             lseek(fd, offset, SEEK_SET);
-            if (read(fd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
+            if (read(fd, buf, io_size) != io_size) {
                 perror("read");
                 exit(1);
             }
@@ -158,22 +171,26 @@ void test_random_read() {
     atomic_thread_fence(memory_order_seq_cst);
     clock_gettime(CLOCK_MONOTONIC, &end);
     atomic_thread_fence(memory_order_seq_cst);
-    printf(
-        "Random read throughput: %.2f MB/s\n",
-        (N * FILE_SIZE / (1024.0 * 1024.0)) /
-            (calculate_time_diff_ns(&start, &end) / (double)NANOS_PER_SECOND));
+
+    double duration = calculate_time_diff_ns(&start, &end);
+    double throughput = (N * FILE_SIZE / (1024.0 * 1024.0)) /
+                        (duration / (double)NANOS_PER_SECOND);
+    printf("IO size %zu Random read throughput: %.2f MB/s\n", io_size,
+           throughput);
     close(fd);
     free(buf);
+    return throughput;
 }
 
-void test_random_write() {
+double test_random_write(size_t io_size) {
+    ll block_count = FILE_SIZE / io_size;
     int fd = open(FILE_PATH, O_WRONLY);
     if (fd < 0) {
         perror("open for write");
         exit(1);
     }
-    char *buf = malloc(BLOCK_SIZE);
-    fill_rand_buffer(buf, BLOCK_SIZE);
+    char *buf = malloc(io_size);
+    fill_rand_buffer(buf, io_size);
     struct timespec start, end;
 
     atomic_thread_fence(memory_order_seq_cst);
@@ -181,10 +198,10 @@ void test_random_write() {
     atomic_thread_fence(memory_order_seq_cst);
 
     for (ll i = 0; i < N; i++) {
-        for (int j = 0; j < BLOCK_COUNT; j++) {
-            off_t offset = (rand() % BLOCK_COUNT) * BLOCK_SIZE;
+        for (int j = 0; j < block_count; j++) {
+            off_t offset = (rand() % block_count) * io_size;
             lseek(fd, offset, SEEK_SET);
-            if (write(fd, buf, BLOCK_SIZE) != BLOCK_SIZE) {
+            if (write(fd, buf, io_size) != io_size) {
                 perror("write");
                 exit(1);
             }
@@ -194,12 +211,15 @@ void test_random_write() {
     atomic_thread_fence(memory_order_seq_cst);
     clock_gettime(CLOCK_MONOTONIC, &end);
     atomic_thread_fence(memory_order_seq_cst);
-    printf(
-        "Random write throughput: %.2f MB/s\n",
-        (N * FILE_SIZE / (1024.0 * 1024.0)) /
-            (calculate_time_diff_ns(&start, &end) / (double)NANOS_PER_SECOND));
+
+    double duration = calculate_time_diff_ns(&start, &end);
+    double throughput = (N * FILE_SIZE / (1024.0 * 1024.0)) /
+                        (duration / (double)NANOS_PER_SECOND);
+    printf("IO Size %zu Random write throughput: %.2f MB/s\n", io_size,
+           throughput);
     close(fd);
     free(buf);
+    return throughput;
 }
 
 void rm_file_if_exists(const char *path) {
@@ -216,13 +236,23 @@ void clear_test_file() {
 }
 
 int main() {
-    printf("Creating test file of size %d bytes...\n", FILE_SIZE);
+    printf("Starting performance tests on file: %s\n", FILE_PATH);
+    size_t iosize[] = {_1KB_BYTES, _1KB_BYTES * 2, _1KB_BYTES * 4,
+                       _1KB_BYTES * 8};
+
     create_test_file();
-    test_seq_read();
-    test_seq_write();
-    test_random_read();
-    test_random_write();
+
+    for (int i = 0; i < sizeof(iosize) / sizeof(iosize[0]); i++) {
+        size_t io_size = iosize[i];
+        printf("\n--- Testing with IO size: %zu bytes ---\n", io_size);
+        test_seq_read(io_size);
+        test_seq_write(io_size);
+        test_random_read(io_size);
+        test_random_write(io_size);
+    }
+
     clear_test_file();
+    printf("Performance tests completed.\n");
 
     return 0;
 }
