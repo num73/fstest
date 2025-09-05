@@ -2,10 +2,15 @@
     基础性能测试，包括顺序读、顺序写、随机读、随机写等场景
     测试函数使用posix的read，write
 
-    IO SIZE固定，不同的线程数对性能的影响测试。
+    不同iosize 和 线程数对性能的影响测试。
+
+
+    因为使用了openmp优化创建文件的过程，编译时需要加上 -fopenmp
+    ubuntu安装openmp：sudo apt-get install libomp-dev
 */
 
 #include <fcntl.h>
+#include <omp.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -22,14 +27,14 @@ typedef long long ll;
 
 #define _1GB_BYTES (1024 * 1024 * 1024L)
 
+#define NANOS_PER_SECOND (1000000000L)
+
+/*----全局配置------*/
+
 #define FILE_PATH_BASE "/mnt/nufs/fs_testfile"
 #define FILE_SIZE (256 * _1MB_BYTES)
 
-// #define BLOCK_COUNT (FILE_SIZE / BLOCK_SIZE)
-
-#define N (10)
-
-#define NANOS_PER_SECOND (1000000000L)
+/*-----------------*/
 
 char **filenames;
 enum test_type { SEQ_READ, SEQ_WRITE, RAND_READ, RAND_WRITE };
@@ -39,7 +44,11 @@ struct test_info {
     int fd;
     void *buf;
     size_t file_size;
+    // 正常情况下，读写的总字节数应该是 file_size * iter_count
+    int iter_count;
     size_t io_size;
+
+    // 作为返回值，实际读写的总字节数
     size_t total_bytes;
 };
 
@@ -56,8 +65,6 @@ void init_filenames(int n) {
         filenames[i] = malloc(256 * sizeof(char));
         snprintf(filenames[i], 256, "%s_%d.dat", FILE_PATH_BASE, i);
     }
-
-    printf("test files: ");
 }
 
 void fill_rand_buffer(char *buf, size_t size) {
@@ -88,7 +95,7 @@ void create_test_file(char *filename, size_t file_size) {
     }
     close(fd);
     free(buf);
-    printf("Test file created.\n");
+    printf("Test file %s created.\n", filename);
 }
 
 void rm_file_if_exists(const char *path) {
@@ -113,10 +120,11 @@ void *test_seq_read_job(void *arg) {
     size_t file_size = info->file_size;
     void *buf = info->buf;
     size_t block_count = file_size / io_size;
+    int iter_count = info->iter_count;
 
     size_t total_bytes = 0;
 
-    for (ll i = 0; i < N; i++) {
+    for (ll i = 0; i < iter_count; i++) {
         // printf("Reading iteration %d...\n", i);
         for (int j = 0; j < block_count; j++) {
             size_t bytes_read = read(fd, buf, io_size);
@@ -139,10 +147,11 @@ void *test_seq_write_job(void *arg) {
     size_t file_size = info->file_size;
     void *buf = info->buf;
     size_t block_count = file_size / io_size;
+    int iter_count = info->iter_count;
 
     size_t total_bytes = 0;
 
-    for (ll i = 0; i < N; i++) {
+    for (ll i = 0; i < iter_count; i++) {
         for (int j = 0; j < block_count; j++) {
             size_t bytes_written = write(fd, buf, io_size);
             if (bytes_written < 0) {
@@ -164,10 +173,11 @@ void *test_rand_read_job(void *arg) {
     size_t file_size = info->file_size;
     void *buf = info->buf;
     size_t block_count = file_size / io_size;
+    int iter_count = info->iter_count;
 
     size_t total_bytes = 0;
 
-    for (ll i = 0; i < N; i++) {
+    for (ll i = 0; i < iter_count; i++) {
         // Randomly seek to a block
         for (int j = 0; j < block_count; j++) {
             off_t offset = (rand() % block_count) * io_size;
@@ -191,10 +201,11 @@ void *test_rand_write_job(void *arg) {
     size_t file_size = info->file_size;
     void *buf = info->buf;
     size_t block_count = file_size / io_size;
+    int iter_count = info->iter_count;
 
     size_t total_bytes = 0;
 
-    for (ll i = 0; i < N; i++) {
+    for (ll i = 0; i < iter_count; i++) {
         for (int j = 0; j < block_count; j++) {
             off_t offset = (rand() % block_count) * io_size;
             lseek(fd, offset, SEEK_SET);
@@ -212,7 +223,7 @@ void *test_rand_write_job(void *arg) {
 
 // job_n个线程同时对n个文件进行测试
 double mul_thread_test(int job_n, size_t io_size, size_t file_size,
-                       enum test_type type) {
+                       int iter_count, enum test_type type) {
     void *(*test_job)(void *) = NULL;
     char *type_str;
     int open_flags;
@@ -251,6 +262,7 @@ double mul_thread_test(int job_n, size_t io_size, size_t file_size,
         test_infos[i].file_size = file_size;
         test_infos[i].io_size = io_size;
         test_infos[i].total_bytes = 0;
+        test_infos[i].iter_count = iter_count;
     }
     pthread_t threads[job_n];
 
@@ -284,24 +296,55 @@ double mul_thread_test(int job_n, size_t io_size, size_t file_size,
 
 int main() {
     /* ------设置参数-----*/
-    int jobs_n = 4;
-    /*-------------*/
-
-    init_filenames(jobs_n);
+    // 最大线程数
+    int jobs_max = 64;
+    // iter_count是每个线程对整个文件读写次数，因为多线程情况会导致总的读写数量过多，所以在测试时动态调整，不作为固定值
+    int iter_count = 5;
+    // 测试的iosizse
     size_t iosize[] = {_1KB_BYTES, _1KB_BYTES * 2, _1KB_BYTES * 4,
-                       _1KB_BYTES * 8};
+                       _1KB_BYTES * 8, _1MB_BYTES * 2};
 
-    for (int i = 0; i < jobs_n; i++) {
+    /*-------------*/
+    printf("==============================================================\n");
+    printf("Starting performance tests on files with max %d threads...\n",
+           jobs_max);
+    printf("IO sizes to test: ");
+    for (int i = 0; i < sizeof(iosize) / sizeof(iosize[0]); i++) {
+        printf("%zu ", iosize[i]);
+    }
+    printf("\n");
+
+    printf(
+        "==============================================================\n\n");
+
+    init_filenames(jobs_max);
+
+    omp_set_num_threads(4);
+#pragma omp parallel for
+    for (int i = 0; i < jobs_max; i++) {
         create_test_file(filenames[i], FILE_SIZE);
     }
     printf("=======Start test=======\n");
-    mul_thread_test(jobs_n, _1KB_BYTES * 4, FILE_SIZE, SEQ_READ);
-    mul_thread_test(jobs_n, _1KB_BYTES * 4, FILE_SIZE, SEQ_WRITE);
-    mul_thread_test(jobs_n, _1KB_BYTES * 4, FILE_SIZE, RAND_READ);
-    mul_thread_test(jobs_n, _1KB_BYTES * 4, FILE_SIZE, RAND_WRITE);
+
+    for (int _jobn = 1; _jobn <= jobs_max; _jobn *= 2) {
+        printf("\n====== Testing with %d threads ======\n", _jobn);
+        for (int i = 0; i < sizeof(iosize) / sizeof(iosize[0]); i++) {
+            size_t io_size = iosize[i];
+            printf("\n--- Testing with IO size: %zu bytes, %d threads ---\n",
+                   io_size, _jobn);
+            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, SEQ_READ);
+            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, SEQ_WRITE);
+            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, RAND_READ);
+            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, RAND_WRITE);
+        }
+        iter_count--;
+        if (iter_count < 1)
+            iter_count = 1;
+    }
+
     printf("=======Test finished=======\n");
 
-    for (int i = 0; i < jobs_n; i++)
+    for (int i = 0; i < jobs_max; i++)
         clear_test_file(filenames[i]);
     return 0;
 }
