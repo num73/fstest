@@ -7,6 +7,15 @@
 
     因为使用了openmp优化创建文件的过程，编译时需要加上 -fopenmp
     ubuntu安装openmp：sudo apt-get install libomp-dev
+
+    -j: 并发数， 默认1
+    -s: iosize，单位byte， 默认4096
+    -i: iter_count，每个线程对整个文件读写次数, 默认5
+    -d: 测试文件存放目录，必须要有
+    -c: 是否创建测试文件，1表示创建，0表示不创建，默认1
+    -f: 是否删除测试文件，1表示删除，0表示不删除，默认1
+
+    ./test5 -j 32 -s 4096 -i 5 -d /mnt/nufs
 */
 
 #include <fcntl.h>
@@ -31,7 +40,7 @@ typedef long long ll;
 
 /*----全局配置------*/
 
-#define FILE_PATH_BASE "/mnt/nufs/fs_testfile"
+#define FILE_PATH_NAME_BASE "fs_testfile"
 #define FILE_SIZE (256 * _1MB_BYTES)
 
 /*-----------------*/
@@ -59,11 +68,12 @@ int64_t calculate_time_diff_ns(struct timespec *start, struct timespec *end) {
     return seconds * NANOS_PER_SECOND + nanoseconds;
 }
 
-void init_filenames(int n) {
+void init_filenames(char *dir, int n) {
     filenames = malloc(n * sizeof(char *));
     for (int i = 0; i < n; i++) {
         filenames[i] = malloc(256 * sizeof(char));
-        snprintf(filenames[i], 256, "%s_%d.dat", FILE_PATH_BASE, i);
+        snprintf(filenames[i], 256, "%s/%s_%d.dat", dir, FILE_PATH_NAME_BASE,
+                 i);
     }
 }
 
@@ -294,56 +304,74 @@ double mul_thread_test(int job_n, size_t io_size, size_t file_size,
     return throughput;
 }
 
-int main() {
+// 参数说明：
+// 线程数
+// iosize， 单位byte
+// iter_count，每个线程对整个文件读写次数
+int main(int argc, char *argv[]) {
     /* ------设置参数-----*/
-    // 最大线程数
-    int jobs_max = 64;
-    // iter_count是每个线程对整个文件读写次数，因为多线程情况会导致总的读写数量过多，所以在测试时动态调整，不作为固定值
+    int jobs_n = 1;
+    size_t iosize = _1KB_BYTES * 4;
     int iter_count = 5;
-    // 测试的iosizse
-    size_t iosize[] = {_1KB_BYTES, _1KB_BYTES * 2, _1KB_BYTES * 4,
-                       _1KB_BYTES * 8, _1MB_BYTES * 2};
+    int opt;
+    char *dir = NULL;
+    int need_creat_file = 1;
+    int need_free_file = 1;
+    while ((opt = getopt(argc, argv, "j:s:i:c:")) != -1) {
+        switch (opt) {
+            case 'j':
+                jobs_n = atoi(optarg);
+                break;
+            case 's':
+                iosize = atoi(optarg);
+                break;
+            case 'i':
+                iter_count = atoi(optarg);
+                break;
+            case 'd':
+                dir = optarg;
+                break;
+            case 'c':
+                need_creat_file = atoi(optarg);
+                break;
+            case 'f':
+                need_free_file = atoi(optarg);
+                break;
+        }
+    }
 
     /*-------------*/
     printf("==============================================================\n");
-    printf("Starting performance tests on files with max %d threads...\n",
-           jobs_max);
+    printf("Starting performance tests on files with %d threads...\n", jobs_n);
     printf("IO sizes to test: ");
-    for (int i = 0; i < sizeof(iosize) / sizeof(iosize[0]); i++) {
-        printf("%zu ", iosize[i]);
-    }
-    printf("\n");
 
     printf(
         "==============================================================\n\n");
-    init_filenames(jobs_max);
 
-    omp_set_num_threads(4);
-    // #pragma omp parallel for
-    for (int i = 0; i < jobs_max; i++) {
-        create_test_file(filenames[i], FILE_SIZE);
+    init_filenames(dir, jobs_n);
+    if (need_creat_file) {
+        omp_set_num_threads(4);
+#pragma omp parallel for
+        for (int i = 0; i < jobs_n; i++) {
+            create_test_file(filenames[i], FILE_SIZE);
+        }
     }
+
     printf("=======Start test=======\n");
 
-    for (int _jobn = 1; _jobn <= jobs_max; _jobn *= 2) {
-        printf("\n====== Testing with %d threads ======\n", _jobn);
-        for (int i = 0; i < sizeof(iosize) / sizeof(iosize[0]); i++) {
-            size_t io_size = iosize[i];
-            printf("\n--- Testing with IO size: %zu bytes, %d threads ---\n",
-                   io_size, _jobn);
-            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, SEQ_READ);
-            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, SEQ_WRITE);
-            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, RAND_READ);
-            mul_thread_test(_jobn, io_size, FILE_SIZE, iter_count, RAND_WRITE);
-        }
-        iter_count--;
-        if (iter_count < 1)
-            iter_count = 1;
-    }
+    printf("\n====== Testing with %d threads, io size: %zu bytes ======\n",
+           jobs_n, iosize);
+    mul_thread_test(jobs_n, iosize, FILE_SIZE, iter_count, SEQ_READ);
+    mul_thread_test(jobs_n, iosize, FILE_SIZE, iter_count, SEQ_WRITE);
+    mul_thread_test(jobs_n, iosize, FILE_SIZE, iter_count, RAND_READ);
+    mul_thread_test(jobs_n, iosize, FILE_SIZE, iter_count, RAND_WRITE);
 
     printf("=======Test finished=======\n");
 
-    for (int i = 0; i < jobs_max; i++)
-        clear_test_file(filenames[i]);
+    if (need_free_file) {
+        for (int i = 0; i < jobs_n; i++)
+            clear_test_file(filenames[i]);
+    }
+
     return 0;
 }
