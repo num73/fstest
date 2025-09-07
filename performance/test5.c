@@ -298,7 +298,10 @@ double mul_thread_test(int job_n, size_t io_size, size_t file_size,
     double duration = calculate_time_diff_ns(&start, &end);
     double throughput = (total_bytes / (1024.0 * 1024.0)) /
                         (duration / (double)NANOS_PER_SECOND);
-
+    for (int i = 0; i < job_n; i++) {
+        close(test_infos[i].fd);
+        free(test_infos[i].buf);
+    }
     printf("IO Size %zu , %d jobs, test type: %s, throughput: %.2f MB/s\n",
            io_size, job_n, type_str, throughput);
     return throughput;
