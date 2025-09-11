@@ -44,6 +44,17 @@ snippet: 文件系统相关的代码片段
 
 **YCSB**
 
+**TPC-C**
+
+## 常用i/o接口 ##
+
+**read/write**
+
+**pread/pwrite**
+
+**mmap**
+
+**io_uring**
 
 # 文件系统 #
 

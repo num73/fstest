@@ -34,6 +34,9 @@ typedef long long ll;
 #define FILE_PATH_BASE "/mnt/nufs/fs_testfile"
 #define FILE_SIZE (256 * _1MB_BYTES)
 
+char *log_filename = "performance_log.csv";
+FILE *log_fp;
+
 /*-----------------*/
 
 char **filenames;
@@ -295,6 +298,9 @@ double mul_thread_test(int job_n, size_t io_size, size_t file_size,
     }
     printf("IO Size %zu , %d jobs, test type: %s, throughput: %.2f MB/s\n",
            io_size, job_n, type_str, throughput);
+
+    fprintf(log_fp, "%zu,%zu,%d,%s,%.2f,%.2f\n", file_size, io_size, job_n,
+            type_str, duration / (double)NANOS_PER_SECOND, throughput);
     return throughput;
 }
 
@@ -307,6 +313,11 @@ int main() {
     // 测试的iosizse
     size_t iosize[] = {_1KB_BYTES, _1KB_BYTES * 2, _1KB_BYTES * 4,
                        _1KB_BYTES * 8, _1MB_BYTES * 2};
+
+    log_fp = fopen(log_filename, "w");
+    fprintf(log_fp,
+            "file_size, "
+            "io_size,thread_count,test_type,run_time(s),throughput_MB_per_s\n");
 
     /*-------------*/
     printf("==============================================================\n");
@@ -344,8 +355,9 @@ int main() {
         if (iter_count < 1)
             iter_count = 1;
     }
-    printf("=======Test finished=======\n");
 
+    printf("=======Test finished=======\n");
+    fclose(log_fp);
     for (int i = 0; i < jobs_max; i++)
         clear_test_file(filenames[i]);
     return 0;
