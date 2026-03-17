@@ -182,10 +182,11 @@ static void test_deep_directory(const struct fstest_config *cfg) {
             break;
         }
         created_depth++;
-
-        size_t len = strlen(current);
-        if (len + 3 >= sizeof(current)) break;
-        snprintf(current + len, sizeof(current) - len, "/d");
+        if (i < depth - 1) {
+            size_t len = strlen(current);
+            if (len + 3 >= sizeof(current)) break;
+            snprintf(current + len, sizeof(current) - len, "/d");
+        }
     }
 
     /* 在最深层创建文件 */
