@@ -182,7 +182,16 @@ static double run_perf_test(int job_n, size_t io_size, size_t file_size,
             free(infos);
             return 0.0;
         }
-        (void)!posix_memalign(&infos[i].buf, io_size, io_size);
+        if (posix_memalign(&infos[i].buf, io_size, io_size) != 0) {
+            printf("  [ERROR] posix_memalign failed for job %d\n", i);
+            for (int j = 0; j < i; j++) {
+                close(infos[j].fd);
+                free(infos[j].buf);
+            }
+            close(infos[i].fd);
+            free(infos);
+            return 0.0;
+        }
         fill_rand_buffer(infos[i].buf, io_size);
         infos[i].file_size = file_size;
         infos[i].io_size = io_size;
