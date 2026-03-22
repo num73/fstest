@@ -7,18 +7,18 @@
              [-f <文件大小MB>] [-i <迭代次数>] [-v]
 
     测试模式 (-m):
-      0 或 all : 运行所有测试 (默认)
-      1        : 功能正确性测试
-      2        : 数据一致性测试
-      3        : 异常场景测试
-      4        : 并发测试
-      5        : 压力和稳定性测试
-      6        : 性能测试
+            all         : 运行所有测试 (默认)
+            functional  : 功能正确性测试
+            consistency : 数据一致性测试
+            exception   : 异常场景测试
+            concurrent  : 并发测试
+            stress      : 压力和稳定性测试
+            performance : 性能测试
 
     示例：
-      ./fstest -d /tmp/fstest_data -m 0          # 运行所有测试
-      ./fstest -d /mnt/nufs -m 6 -j 4 -s 4096   # 性能测试，4线程
-      ./fstest -d /tmp/fstest_data -m 1           # 仅功能正确性测试
+            ./fstest -d /tmp/fstest_data -m all                 # 运行所有测试
+            ./fstest -d /mnt/nufs -m performance -j 4 -s 4096  # 性能测试，4线程
+            ./fstest -d /tmp/fstest_data -m functional         # 仅功能正确性测试
 */
 
 #include "common.h"
@@ -35,14 +35,14 @@ static void print_usage(const char *prog) {
     printf("Required:\n");
     printf("  -d <dir>     测试文件存放目录\n\n");
     printf("Options:\n");
-    printf("  -m <mode>    测试模式 (默认: 0)\n");
-    printf("                 0 = 运行所有测试\n");
-    printf("                 1 = 功能正确性测试\n");
-    printf("                 2 = 数据一致性测试\n");
-    printf("                 3 = 异常场景测试\n");
-    printf("                 4 = 并发测试\n");
-    printf("                 5 = 压力和稳定性测试\n");
-    printf("                 6 = 性能测试\n");
+    printf("  -m <mode>    测试模式 (默认: all)\n");
+    printf("                 all = 运行所有测试\n");
+    printf("                 functional = 功能正确性测试\n");
+    printf("                 consistency = 数据一致性测试\n");
+    printf("                 exception = 异常场景测试\n");
+    printf("                 concurrent = 并发测试\n");
+    printf("                 stress = 压力和稳定性测试\n");
+    printf("                 performance = 性能测试\n");
     printf("  -j <n>       并发线程数 (默认: %d, 最大: %d)\n",
            DEFAULT_JOBS, MAX_JOBS);
     printf("  -s <bytes>   IO 大小 (默认: %ld)\n",
@@ -54,21 +54,67 @@ static void print_usage(const char *prog) {
     printf("  -h           显示帮助信息\n");
     printf("\nExamples:\n");
     printf("  %s -d /tmp/fstest_data\n", prog);
-    printf("  %s -d /mnt/nufs -m 6 -j 4 -s 4096\n", prog);
-    printf("  %s -d /tmp/fstest_data -m 1\n", prog);
+    printf("  %s -d /mnt/nufs -m performance -j 4 -s 4096\n", prog);
+    printf("  %s -d /tmp/fstest_data -m functional\n", prog);
 }
 
-static const char *mode_name(int mode) {
+static const char *mode_key(enum fstest_mode mode) {
     switch (mode) {
-        case 0: return "所有测试";
-        case 1: return "功能正确性测试";
-        case 2: return "数据一致性测试";
-        case 3: return "异常场景测试";
-        case 4: return "并发测试";
-        case 5: return "压力和稳定性测试";
-        case 6: return "性能测试";
+        case TEST_MODE_ALL: return "all";
+        case TEST_MODE_FUNCTIONAL: return "functional";
+        case TEST_MODE_CONSISTENCY: return "consistency";
+        case TEST_MODE_EXCEPTION: return "exception";
+        case TEST_MODE_CONCURRENT: return "concurrent";
+        case TEST_MODE_STRESS: return "stress";
+        case TEST_MODE_PERFORMANCE: return "performance";
+        default: return "unknown";
+    }
+}
+
+static const char *mode_name(enum fstest_mode mode) {
+    switch (mode) {
+        case TEST_MODE_ALL: return "所有测试";
+        case TEST_MODE_FUNCTIONAL: return "功能正确性测试";
+        case TEST_MODE_CONSISTENCY: return "数据一致性测试";
+        case TEST_MODE_EXCEPTION: return "异常场景测试";
+        case TEST_MODE_CONCURRENT: return "并发测试";
+        case TEST_MODE_STRESS: return "压力和稳定性测试";
+        case TEST_MODE_PERFORMANCE: return "性能测试";
         default: return "未知";
     }
+}
+
+static int parse_test_mode(const char *mode_arg, enum fstest_mode *mode) {
+    if (strcasecmp(mode_arg, "all") == 0 || strcmp(mode_arg, "0") == 0) {
+        *mode = TEST_MODE_ALL;
+        return 0;
+    }
+    if (strcasecmp(mode_arg, "functional") == 0 || strcmp(mode_arg, "1") == 0) {
+        *mode = TEST_MODE_FUNCTIONAL;
+        return 0;
+    }
+    if (strcasecmp(mode_arg, "consistency") == 0 || strcmp(mode_arg, "2") == 0) {
+        *mode = TEST_MODE_CONSISTENCY;
+        return 0;
+    }
+    if (strcasecmp(mode_arg, "exception") == 0 || strcmp(mode_arg, "3") == 0) {
+        *mode = TEST_MODE_EXCEPTION;
+        return 0;
+    }
+    if (strcasecmp(mode_arg, "concurrent") == 0 || strcmp(mode_arg, "4") == 0) {
+        *mode = TEST_MODE_CONCURRENT;
+        return 0;
+    }
+    if (strcasecmp(mode_arg, "stress") == 0 || strcmp(mode_arg, "5") == 0) {
+        *mode = TEST_MODE_STRESS;
+        return 0;
+    }
+    if (strcasecmp(mode_arg, "performance") == 0 || strcmp(mode_arg, "6") == 0) {
+        *mode = TEST_MODE_PERFORMANCE;
+        return 0;
+    }
+
+    return -1;
 }
 
 int main(int argc, char *argv[]) {
@@ -78,7 +124,7 @@ int main(int argc, char *argv[]) {
     cfg.io_size = DEFAULT_IO_SIZE;
     cfg.file_size = DEFAULT_FILE_SIZE;
     cfg.iter_count = DEFAULT_ITER;
-    cfg.test_mode = 0;
+    cfg.test_mode = TEST_MODE_ALL;
     cfg.verbose = 0;
 
     int opt;
@@ -88,7 +134,14 @@ int main(int argc, char *argv[]) {
                 strncpy(cfg.dir, optarg, MAX_PATH_LEN - 1);
                 break;
             case 'm':
-                cfg.test_mode = atoi(optarg);
+                if (parse_test_mode(optarg, &cfg.test_mode) != 0) {
+                    fprintf(stderr,
+                            "Error: 无效的测试模式 '%s'\n"
+                            "有效模式: all, functional, consistency, "
+                            "exception, concurrent, stress, performance\n",
+                            optarg);
+                    return 1;
+                }
                 break;
             case 'j':
                 cfg.jobs = atoi(optarg);
@@ -126,12 +179,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (cfg.test_mode < 0 || cfg.test_mode > 6) {
-        fprintf(stderr, "Error: 无效的测试模式 %d (有效范围: 0-6)\n",
-                cfg.test_mode);
-        return 1;
-    }
-
     /* 确保测试目录存在 */
     if (ensure_dir_exists(cfg.dir) != 0) {
         fprintf(stderr, "Error: 无法创建测试目录 %s: %s\n",
@@ -145,7 +192,7 @@ int main(int argc, char *argv[]) {
     printf("╚══════════════════════════════════════════╝\n");
     printf("配置:\n");
     printf("  测试目录:   %s\n", cfg.dir);
-    printf("  测试模式:   %d (%s)\n", cfg.test_mode,
+    printf("  测试模式:   %s (%s)\n", mode_key(cfg.test_mode),
            mode_name(cfg.test_mode));
     printf("  线程数:     %d\n", cfg.jobs);
     printf("  IO 大小:    %zu bytes\n", cfg.io_size);
@@ -158,22 +205,22 @@ int main(int argc, char *argv[]) {
     struct timespec total_start, total_end;
     clock_gettime(CLOCK_MONOTONIC, &total_start);
 
-    if (cfg.test_mode == 0 || cfg.test_mode == 1) {
+    if (cfg.test_mode == TEST_MODE_ALL || cfg.test_mode == TEST_MODE_FUNCTIONAL) {
         run_functional_tests(&cfg);
     }
-    if (cfg.test_mode == 0 || cfg.test_mode == 2) {
+    if (cfg.test_mode == TEST_MODE_ALL || cfg.test_mode == TEST_MODE_CONSISTENCY) {
         run_consistency_tests(&cfg);
     }
-    if (cfg.test_mode == 0 || cfg.test_mode == 3) {
+    if (cfg.test_mode == TEST_MODE_ALL || cfg.test_mode == TEST_MODE_EXCEPTION) {
         run_exception_tests(&cfg);
     }
-    if (cfg.test_mode == 0 || cfg.test_mode == 4) {
+    if (cfg.test_mode == TEST_MODE_ALL || cfg.test_mode == TEST_MODE_CONCURRENT) {
         run_concurrent_tests(&cfg);
     }
-    if (cfg.test_mode == 0 || cfg.test_mode == 5) {
+    if (cfg.test_mode == TEST_MODE_ALL || cfg.test_mode == TEST_MODE_STRESS) {
         run_stress_tests(&cfg);
     }
-    if (cfg.test_mode == 0 || cfg.test_mode == 6) {
+    if (cfg.test_mode == TEST_MODE_ALL || cfg.test_mode == TEST_MODE_PERFORMANCE) {
         run_performance_tests(&cfg);
     }
 

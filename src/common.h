@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -48,6 +49,16 @@ typedef long long ll;
 #define TEST_SKIP(name, reason) \
     printf("  [SKIP] %s: %s\n", (name), (reason))
 
+enum fstest_mode {
+    TEST_MODE_ALL = 0,
+    TEST_MODE_FUNCTIONAL = 1,
+    TEST_MODE_CONSISTENCY = 2,
+    TEST_MODE_EXCEPTION = 3,
+    TEST_MODE_CONCURRENT = 4,
+    TEST_MODE_STRESS = 5,
+    TEST_MODE_PERFORMANCE = 6,
+};
+
 /* 全局配置结构 */
 struct fstest_config {
     char dir[MAX_PATH_LEN];   /* 测试目录 */
@@ -55,7 +66,7 @@ struct fstest_config {
     size_t io_size;            /* IO 大小 (bytes) */
     size_t file_size;          /* 测试文件大小 (bytes) */
     int iter_count;            /* 迭代次数 */
-    int test_mode;             /* 测试模式 (1-6, 0=all) */
+    enum fstest_mode test_mode; /* 测试模式 (all/functional/...) */
     int verbose;               /* 详细输出 */
 };
 

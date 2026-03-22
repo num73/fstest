@@ -5,17 +5,59 @@
     - 顺序读写吞吐
     - 随机读写 IOPS
     - 延迟统计
+    - O_DIRECT 绕过页缓存吞吐
+    - mmap 映射方式的顺序/随机读写吞吐
     - 元数据操作性能 (create/stat/rename/unlink)
     - 不同块大小、不同并发数下的表现
 */
 
 #include "test_performance.h"
 
+#include <sys/mman.h>
 #include <sys/stat.h>
 
 /* 文件名管理 */
 static char **perf_filenames = NULL;
 static int perf_filenames_count = 0;
+
+struct mmap_test_info {
+    const char *file_name;
+    int fd;
+    char *buf;
+    unsigned char *map;
+    size_t file_size;
+    int iter_count;
+    size_t io_size;
+    size_t total_bytes;
+    enum test_type type;
+    int error;
+};
+
+static const char *perf_type_name(enum test_type type) {
+    switch (type) {
+        case SEQ_READ:
+            return "Sequential Read";
+        case SEQ_WRITE:
+            return "Sequential Write";
+        case RAND_READ:
+            return "Random Read";
+        case RAND_WRITE:
+            return "Random Write";
+    }
+
+    return "Unknown";
+}
+
+static int is_direct_io_unsupported(int err) {
+    return err == EINVAL || err == EOPNOTSUPP || err == ENOTSUP;
+}
+
+static size_t align_up(size_t value, size_t alignment) {
+    if (alignment == 0) {
+        return value;
+    }
+    return ((value + alignment - 1) / alignment) * alignment;
+}
 
 static void init_perf_filenames(const char *dir, int n) {
     perf_filenames = malloc(n * sizeof(char *));
@@ -139,50 +181,109 @@ static void *perf_rand_write_job(void *arg) {
     return NULL;
 }
 
+static void *perf_mmap_job(void *arg) {
+    struct mmap_test_info *info = (struct mmap_test_info *)arg;
+    size_t block_count = info->file_size / info->io_size;
+    size_t total_bytes = 0;
+    unsigned int seed = (unsigned int)(uintptr_t)info;
+    volatile unsigned int sink = 0;
+
+    if (block_count == 0) {
+        info->total_bytes = 0;
+        return NULL;
+    }
+
+    for (int i = 0; i < info->iter_count; i++) {
+        for (size_t j = 0; j < block_count; j++) {
+            size_t block_index = j;
+            if (info->type == RAND_READ || info->type == RAND_WRITE) {
+                block_index = rand_r(&seed) % block_count;
+            }
+
+            size_t offset = block_index * info->io_size;
+            unsigned char *addr = info->map + offset;
+
+            if (info->type == SEQ_READ || info->type == RAND_READ) {
+                memcpy(info->buf, addr, info->io_size);
+                sink ^= (unsigned int)info->buf[0];
+            } else {
+                memcpy(addr, info->buf, info->io_size);
+            }
+            total_bytes += info->io_size;
+        }
+
+        if (info->type == SEQ_WRITE || info->type == RAND_WRITE) {
+            if (msync(info->map, info->file_size, MS_SYNC) != 0) {
+                info->error = errno;
+                break;
+            }
+        }
+    }
+
+    info->total_bytes = total_bytes + (sink & 0u);
+    return NULL;
+}
+
 /* 多线程性能测试 */
 static double run_perf_test(int job_n, size_t io_size, size_t file_size,
-                            int iter_count, enum test_type type) {
+                            int iter_count, enum test_type type,
+                            int use_direct_io) {
     void *(*test_job)(void *) = NULL;
-    const char *type_str;
+    const char *type_str = perf_type_name(type);
     int open_flags;
+    size_t buf_alignment = sizeof(void *);
     switch (type) {
         case SEQ_READ:
             test_job = perf_seq_read_job;
-            type_str = "Sequential Read";
             open_flags = O_RDONLY;
             break;
         case SEQ_WRITE:
             test_job = perf_seq_write_job;
-            type_str = "Sequential Write";
             open_flags = O_WRONLY | O_CREAT;
             break;
         case RAND_READ:
             test_job = perf_rand_read_job;
-            type_str = "Random Read";
             open_flags = O_RDONLY;
             break;
         case RAND_WRITE:
             test_job = perf_rand_write_job;
-            type_str = "Random Write";
             open_flags = O_WRONLY | O_CREAT;
             break;
     }
+
+#ifdef O_DIRECT
+    if (use_direct_io) {
+        open_flags |= O_DIRECT;
+        buf_alignment = 4096;
+    }
+#else
+    if (use_direct_io) {
+        printf("  [SKIP] %s (O_DIRECT): O_DIRECT is not available on this platform\n",
+               type_str);
+        return -1.0;
+    }
+#endif
 
     struct test_info *infos = malloc(job_n * sizeof(struct test_info));
     for (int i = 0; i < job_n; i++) {
         infos[i].file_name = perf_filenames[i];
         infos[i].fd = open(perf_filenames[i], open_flags, 0644);
         if (infos[i].fd < 0) {
-            printf("  [ERROR] Cannot open %s: %s\n",
-                   perf_filenames[i], strerror(errno));
+            if (use_direct_io && is_direct_io_unsupported(errno)) {
+                printf("  [SKIP] %s (O_DIRECT): %s\n",
+                       type_str, strerror(errno));
+            } else {
+                printf("  [ERROR] Cannot open %s: %s\n",
+                       perf_filenames[i], strerror(errno));
+            }
             for (int j = 0; j < i; j++) {
                 close(infos[j].fd);
                 free(infos[j].buf);
             }
             free(infos);
-            return 0.0;
+            return use_direct_io && is_direct_io_unsupported(errno) ? -1.0 : 0.0;
         }
-        if (posix_memalign(&infos[i].buf, io_size, io_size) != 0) {
+        if (posix_memalign(&infos[i].buf, buf_alignment, io_size) != 0) {
             printf("  [ERROR] posix_memalign failed for job %d\n", i);
             for (int j = 0; j < i; j++) {
                 close(infos[j].fd);
@@ -231,9 +332,191 @@ static double run_perf_test(int job_n, size_t io_size, size_t file_size,
     free(infos);
     free(threads);
 
-    printf("  %-20s | IO: %6zuB | %2d jobs | %.2f MB/s | %.3f s\n",
-           type_str, io_size, job_n, throughput_mbs, duration_s);
+    char label[48];
+    snprintf(label, sizeof(label), "%s%s", type_str,
+             use_direct_io ? " (O_DIRECT)" : "");
+    printf("  %-31s | IO: %6zuB | %2d jobs | %.2f MB/s | %.3f s\n",
+           label,
+           io_size, job_n, throughput_mbs, duration_s);
     return throughput_mbs;
+}
+
+static double run_mmap_perf_test(int job_n, size_t io_size, size_t file_size,
+                                 int iter_count, enum test_type type) {
+    int open_flags =
+        (type == SEQ_READ || type == RAND_READ) ? O_RDONLY : O_RDWR;
+    int prot =
+        (type == SEQ_READ || type == RAND_READ) ? PROT_READ : (PROT_READ | PROT_WRITE);
+
+    struct mmap_test_info *infos = malloc(job_n * sizeof(struct mmap_test_info));
+    pthread_t *threads = malloc(job_n * sizeof(pthread_t));
+    if (!infos || !threads) {
+        printf("  [ERROR] mmap test allocation failed\n");
+        free(infos);
+        free(threads);
+        return 0.0;
+    }
+
+    memset(infos, 0, job_n * sizeof(struct mmap_test_info));
+    for (int i = 0; i < job_n; i++) {
+        infos[i].file_name = perf_filenames[i];
+        infos[i].fd = open(perf_filenames[i], open_flags, 0644);
+        if (infos[i].fd < 0) {
+            printf("  [ERROR] Cannot open %s for mmap test: %s\n",
+                   perf_filenames[i], strerror(errno));
+            for (int j = 0; j < i; j++) {
+                munmap(infos[j].map, infos[j].file_size);
+                close(infos[j].fd);
+                free(infos[j].buf);
+            }
+            free(infos);
+            free(threads);
+            return 0.0;
+        }
+
+        infos[i].buf = malloc(io_size);
+        if (!infos[i].buf) {
+            printf("  [ERROR] malloc failed for mmap job %d\n", i);
+            close(infos[i].fd);
+            for (int j = 0; j < i; j++) {
+                munmap(infos[j].map, infos[j].file_size);
+                close(infos[j].fd);
+                free(infos[j].buf);
+            }
+            free(infos);
+            free(threads);
+            return 0.0;
+        }
+
+        fill_rand_buffer(infos[i].buf, io_size);
+        infos[i].map = mmap(NULL, file_size, prot, MAP_SHARED,
+                            infos[i].fd, 0);
+        if (infos[i].map == MAP_FAILED) {
+            printf("  [ERROR] mmap failed for %s: %s\n",
+                   perf_filenames[i], strerror(errno));
+            free(infos[i].buf);
+            close(infos[i].fd);
+            for (int j = 0; j < i; j++) {
+                munmap(infos[j].map, infos[j].file_size);
+                close(infos[j].fd);
+                free(infos[j].buf);
+            }
+            free(infos);
+            free(threads);
+            return 0.0;
+        }
+
+        infos[i].file_size = file_size;
+        infos[i].iter_count = iter_count;
+        infos[i].io_size = io_size;
+        infos[i].type = type;
+    }
+
+    struct timespec start, end;
+    size_t total_bytes = 0;
+    atomic_thread_fence(memory_order_seq_cst);
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    atomic_thread_fence(memory_order_seq_cst);
+
+    for (int i = 0; i < job_n; i++) {
+        pthread_create(&threads[i], NULL, perf_mmap_job, &infos[i]);
+    }
+    for (int i = 0; i < job_n; i++) {
+        pthread_join(threads[i], NULL);
+        total_bytes += infos[i].total_bytes;
+    }
+
+    atomic_thread_fence(memory_order_seq_cst);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    atomic_thread_fence(memory_order_seq_cst);
+
+    for (int i = 0; i < job_n; i++) {
+        if (infos[i].error != 0) {
+            printf("  [ERROR] %s (mmap): %s\n",
+                   perf_type_name(type), strerror(infos[i].error));
+            for (int j = 0; j < job_n; j++) {
+                if (infos[j].map && infos[j].map != MAP_FAILED) {
+                    munmap(infos[j].map, infos[j].file_size);
+                }
+                if (infos[j].fd >= 0) {
+                    close(infos[j].fd);
+                }
+                free(infos[j].buf);
+            }
+            free(infos);
+            free(threads);
+            return 0.0;
+        }
+    }
+
+    double duration_ns = calculate_time_diff_ns(&start, &end);
+    double duration_s = duration_ns / (double)NANOS_PER_SECOND;
+    double throughput_mbs =
+        duration_s > 0.0 ? (total_bytes / (1024.0 * 1024.0)) / duration_s : 0.0;
+
+    char label[48];
+    snprintf(label, sizeof(label), "%s (mmap)", perf_type_name(type));
+    printf("  %-31s | IO: %6zuB | %2d jobs | %.2f MB/s | %.3f s\n",
+           label, io_size, job_n, throughput_mbs, duration_s);
+
+    for (int i = 0; i < job_n; i++) {
+        munmap(infos[i].map, infos[i].file_size);
+        close(infos[i].fd);
+        free(infos[i].buf);
+    }
+    free(infos);
+    free(threads);
+    return throughput_mbs;
+}
+
+static void test_direct_io_perf(const struct fstest_config *cfg, int job_n) {
+    printf("\n  --- 绕过页缓存测试 (O_DIRECT) ---\n");
+
+#ifndef O_DIRECT
+    TEST_SKIP("direct I/O throughput", "O_DIRECT is not available on this platform");
+    return;
+#else
+    size_t direct_io_size = align_up(cfg->io_size, 4096);
+    if (direct_io_size == 0) {
+        direct_io_size = 4096;
+    }
+    if (direct_io_size != cfg->io_size) {
+        printf("  Requested IO size %zuB is not O_DIRECT-aligned; using %zuB instead.\n",
+               cfg->io_size, direct_io_size);
+    }
+
+    double read_result = run_perf_test(job_n, direct_io_size,
+                                       cfg->file_size, cfg->iter_count,
+                                       SEQ_READ, 1);
+    double write_result = run_perf_test(job_n, direct_io_size,
+                                        cfg->file_size, cfg->iter_count,
+                                        SEQ_WRITE, 1);
+    double rand_read_result = run_perf_test(job_n, direct_io_size,
+                                            cfg->file_size, cfg->iter_count,
+                                            RAND_READ, 1);
+    double rand_write_result = run_perf_test(job_n, direct_io_size,
+                                             cfg->file_size, cfg->iter_count,
+                                             RAND_WRITE, 1);
+
+    if (read_result < 0.0 && write_result < 0.0 &&
+        rand_read_result < 0.0 && rand_write_result < 0.0) {
+        TEST_SKIP("direct I/O throughput",
+                  "filesystem or kernel does not support O_DIRECT for this workload");
+    }
+#endif
+}
+
+static void test_mmap_perf(const struct fstest_config *cfg, int job_n) {
+    printf("\n  --- 内存映射测试 (mmap) ---\n");
+
+    run_mmap_perf_test(job_n, cfg->io_size, cfg->file_size,
+                       cfg->iter_count, SEQ_READ);
+    run_mmap_perf_test(job_n, cfg->io_size, cfg->file_size,
+                       cfg->iter_count, SEQ_WRITE);
+    run_mmap_perf_test(job_n, cfg->io_size, cfg->file_size,
+                       cfg->iter_count, RAND_READ);
+    run_mmap_perf_test(job_n, cfg->io_size, cfg->file_size,
+                       cfg->iter_count, RAND_WRITE);
 }
 
 /* 测试：延迟统计 (单线程单次操作延迟) */
@@ -403,13 +686,16 @@ void run_performance_tests(const struct fstest_config *cfg) {
     /* 吞吐测试 */
     printf("\n  --- 吞吐测试 (Throughput) ---\n");
     run_perf_test(job_n, cfg->io_size, cfg->file_size,
-                  cfg->iter_count, SEQ_READ);
+                  cfg->iter_count, SEQ_READ, 0);
     run_perf_test(job_n, cfg->io_size, cfg->file_size,
-                  cfg->iter_count, SEQ_WRITE);
+                  cfg->iter_count, SEQ_WRITE, 0);
     run_perf_test(job_n, cfg->io_size, cfg->file_size,
-                  cfg->iter_count, RAND_READ);
+                  cfg->iter_count, RAND_READ, 0);
     run_perf_test(job_n, cfg->io_size, cfg->file_size,
-                  cfg->iter_count, RAND_WRITE);
+                  cfg->iter_count, RAND_WRITE, 0);
+
+    test_direct_io_perf(cfg, job_n);
+    test_mmap_perf(cfg, job_n);
 
     /* 不同块大小的测试 */
     printf("\n  --- 不同 IO 大小 (Variable IO Size) ---\n");
@@ -418,7 +704,7 @@ void run_performance_tests(const struct fstest_config *cfg) {
     int num_sizes = sizeof(io_sizes) / sizeof(io_sizes[0]);
     for (int s = 0; s < num_sizes; s++) {
         run_perf_test(job_n, io_sizes[s], cfg->file_size,
-                      cfg->iter_count, SEQ_READ);
+                      cfg->iter_count, SEQ_READ, 0);
     }
 
     /* 延迟测试 */

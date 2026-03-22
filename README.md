@@ -21,7 +21,7 @@ make
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `-d <dir>` | 测试文件存放目录（必须） | - |
-| `-m <mode>` | 测试模式（0-6） | 0 (全部) |
+| `-m <mode>` | 测试模式（使用英文单词） | `all` |
 | `-j <n>` | 并发线程数 | 1 |
 | `-s <bytes>` | IO 大小（字节） | 4096 |
 | `-f <MB>` | 测试文件大小（MB） | 256 |
@@ -29,17 +29,19 @@ make
 | `-v` | 详细输出 | - |
 | `-h` | 显示帮助 | - |
 
+说明：当前推荐使用英文模式名；为兼容旧脚本，程序仍接受历史数字别名 `0-6`。
+
 ### 测试模式
 
 | 模式 | 说明 |
 |------|------|
-| 0 | 运行所有测试 |
-| 1 | 功能正确性测试 |
-| 2 | 数据一致性测试 |
-| 3 | 异常场景测试 |
-| 4 | 并发测试 |
-| 5 | 压力和稳定性测试 |
-| 6 | 性能测试 |
+| `all` | 运行所有测试 |
+| `functional` | 功能正确性测试 |
+| `consistency` | 数据一致性测试 |
+| `exception` | 异常场景测试 |
+| `concurrent` | 并发测试 |
+| `stress` | 压力和稳定性测试 |
+| `performance` | 性能测试 |
 
 ### 示例
 
@@ -48,21 +50,21 @@ make
 ./fstest -d /tmp/fstest_data
 
 # 仅运行功能正确性测试
-./fstest -d /tmp/fstest_data -m 1
+./fstest -d /tmp/fstest_data -m functional
 
 # 性能测试，4线程，4KB IO
-./fstest -d /mnt/nufs -m 6 -j 4 -s 4096
+./fstest -d /mnt/nufs -m performance -j 4 -s 4096
 
 # 并发测试，8线程
-./fstest -d /tmp/fstest_data -m 4 -j 8
+./fstest -d /tmp/fstest_data -m concurrent -j 8
 
 # 压力测试，小文件大小
-./fstest -d /tmp/fstest_data -m 5 -f 16 -i 2
+./fstest -d /tmp/fstest_data -m stress -f 16 -i 2
 ```
 
 ## 测试类别
 
-### 1. 功能正确性测试 (`-m 1`)
+### 1. 功能正确性测试 (`-m functional`)
 
 验证基本文件系统操作是否正确：
 
@@ -74,7 +76,7 @@ make
 - 硬链接 / 软链接
 - 路径解析（相对路径、绝对路径、`.`、`..`）
 
-### 2. 数据一致性测试 (`-m 2`)
+### 2. 数据一致性测试 (`-m consistency`)
 
 确保写入的数据读回后是正确的：
 
@@ -85,7 +87,7 @@ make
 - 稀疏文件测试
 - 反复覆盖写后的结果验证
 
-### 3. 异常场景测试 (`-m 3`)
+### 3. 异常场景测试 (`-m exception`)
 
 测试文件系统在异常条件下的行为：
 
@@ -96,7 +98,7 @@ make
 - 中断写操作后的文件可访问性
 - 边界条件（零长度写、超长文件名）
 
-### 4. 并发测试 (`-m 4`)
+### 4. 并发测试 (`-m concurrent`)
 
 验证多线程并发操作的可靠性：
 
@@ -106,7 +108,7 @@ make
 - 文件锁测试（带锁计数器）
 - 竞争条件检测
 
-### 5. 压力和稳定性测试 (`-m 5`)
+### 5. 压力和稳定性测试 (`-m stress`)
 
 测试高负载下的表现：
 
@@ -116,15 +118,29 @@ make
 - 高频创建 / 删除 / 重命名
 - 循环读写一致性验证
 
-### 6. 性能测试 (`-m 6`)
+### 6. 性能测试 (`-m performance`)
 
 衡量文件系统性能表现：
 
-- 顺序读写吞吐量
-- 随机读写吞吐量
+- 基于常规 `read/write` 的顺序读写吞吐量
+- 基于常规 `read/write` 的随机读写吞吐量
+- 基于 `O_DIRECT` 的顺序/随机读写吞吐量
+- 基于 `mmap` 的顺序/随机读写吞吐量
 - 不同 IO 大小下的表现
 - 读写延迟统计（平均、最小、最大）
 - 元数据操作性能（create / stat / rename / unlink）
+
+实现上，这一组测试会分别从三种访问路径观察文件系统性能：普通 `read/write`、尽量绕过页缓存的 `O_DIRECT`，以及基于内存映射的 `mmap`。
+
+- `O_DIRECT` 路径包含顺序读、顺序写、随机读、随机写四项；如果当前文件系统、挂载方式或内核不支持，则会输出 `SKIP`，不会让整组性能测试失败。
+- 由于 `O_DIRECT` 对齐要求较严格，测试时会把 `IO size` 向上对齐到 `4096` 字节后再执行。
+- `mmap` 路径同样覆盖顺序读、顺序写、随机读、随机写；其中写测试使用共享映射，并在每轮迭代后执行 `msync(MS_SYNC)`，因此结果更接近“映射写入并同步落盘”的开销。
+
+输出中会看到类似下面几类标签：
+
+- `Sequential Read` / `Sequential Write` / `Random Read` / `Random Write`
+- `Sequential Read (O_DIRECT)` / `Sequential Write (O_DIRECT)` / `Random Read (O_DIRECT)` / `Random Write (O_DIRECT)`
+- `Sequential Read (mmap)` / `Sequential Write (mmap)` / `Random Read (mmap)` / `Random Write (mmap)`
 
 ## 目录结构
 
@@ -139,34 +155,6 @@ src/                    # 统一测试工具源码
   test_stress.c         # 压力和稳定性测试
   test_performance.c    # 性能测试
 Makefile                # 编译构建
-function/               # 单独的功能测试示例
-performance/            # 单独的性能测试示例
-snippet/                # 代码片段
-docs/                   # 文档
-plot/                   # 数据可视化
+
 ```
-
-## 性能测试
-
-### 性能指标
-
-**Throughput** 吞吐量，单位时间内读/写的数据量。
-
-**Latency** 延迟，一般定义为单个操作的时间。
-
-### 影响性能指标的因素
-
-**`O_DIRECT`标记** 有些文件系统支持`O_DIRECT`标志，如果不加`O_DIRECT`标志，可能会通过缓存进行读写，比如ext4文件系统，如果不加`O_DIRECT`，对文件的读写会经过page cache，测出来的性能实际上是缓存的性能。
-
-**numa节点** 如果机器上有多个numa节点，在不同numa节点的cpu和内存上执行的测试结果不同。
-
-## 常用测试工具
-
-**iozone** | **FIO** | **ior** | **mdtest** | **filebench** | **YCSB** | **TPC-C**
-
-## 常用i/o接口
-
-**read/write** | **pread/pwrite** | **mmap** | **io_uring** | **SPDK**
-
-# 文件系统
 
